@@ -18,7 +18,8 @@
 #   tools/sync-to-efi.sh acpi      只同步 OC/ACPI
 #   tools/sync-to-efi.sh drivers   只同步 OC/Drivers
 #   tools/sync-to-efi.sh tools     只同步 OC/Tools
-#   tools/sync-to-efi.sh all       同步 BOOT + OC 下全部子目录 + config.plist
+#   tools/sync-to-efi.sh all       同步 BOOT + OC 下全部子目录 + OC 直属文件
+#                                  （OpenCore.efi 等）+ config.plist
 #
 # 可选参数:
 #   -n, --dry-run   只预览将要做的改动，不写入任何内容
@@ -125,11 +126,18 @@ make_backup() {
   mkdir -p "$BK" || die "无法创建备份目录: $BK"
   cp -R "$TARGET_EFI" "$BK/EFI-partition" || die "备份失败，已中止（分区未做任何改动）"
   sync
-  local a b
-  a="$(find "$TARGET_EFI" -type f 2>/dev/null | wc -l | tr -d ' ')"
-  b="$(find "$BK/EFI-partition" -type f 2>/dev/null | wc -l | tr -d ' ')"
-  [ "$a" = "$b" ] || die "备份文件数不符（源 $a / 备份 $b），已中止"
-  echo "  $BK/EFI-partition  （$b 个文件，已复验）"
+
+  # 复验：逐文件比对（排除 macOS 元数据）。
+  # ⚠ 这里不能用「文件计数」比对：cp 从 FAT 卷往外拷时会把 ._* 当作资源派生
+  #   元数据吸附到对应文件上，不落成独立文件，计数必然比源少（实测 216 vs 125），
+  #   但内容其实是完整的。计数会误报，逐文件比对才是可靠判据。
+  local d
+  d="$(diff -r -q -x '._*' -x '.DS_Store' "$TARGET_EFI" "$BK/EFI-partition" 2>&1)"
+  if [ -n "$d" ]; then
+    printf '%s\n' "$d"
+    die "备份复验失败（上方为差异明细），已中止（分区未做任何改动）"
+  fi
+  echo "  $BK/EFI-partition  （$(count_files "$BK/EFI-partition") 个文件，逐文件复验通过）"
 }
 
 # ---------------------------------------------------------------- 同步 config.plist
@@ -140,7 +148,7 @@ sync_config() {
 
   step "同步 OC/config.plist（三码受保护）"
   [ -f "$src" ] || die "源不存在: $src"
-  [ -f "$dst" ] || die "目标不存在: $dst（首次部署请手工处理，本脚本只做增量同步）"
+  [ -f "$dst" ] || die "目标不存在: ${dst}（首次部署请手工处理，本脚本只做增量同步）"
 
   local tmp="$WORK/config.plist.synced"
   cp "$src" "$tmp" || die "复制到临时文件失败"
@@ -221,6 +229,47 @@ sync_dir() {
   fi
 }
 
+# ---------------------------------------------------------------- OC 直属文件
+#
+# ⚠ 这里曾经漏过一次，务必保留：
+#   OC/OpenCore.efi 是直接放在 OC/ 目录下的**文件**，不属于任何子目录，
+#   而上面的 sync_dir 只处理「目录」。若只同步子目录，就会出现
+#   「1.0.8 的驱动/OpenRuntime + 1.0.7 的 OpenCore.efi」这种最危险的不匹配
+#   （OpenRuntime 与 OpenCore 是版本锁定的，不匹配会导致引导失败）。
+#   所以 OC/ 下的直属文件必须单独同步。
+#
+#   config*.plist 不在这里处理：config.plist 由 sync_config 负责（三码受保护），
+#   另外几份备用 config 属上游存档，不参与自动同步。
+
+sync_oc_root_files() {
+  step "同步 OC/ 下的直属文件（OpenCore.efi 等）"
+  local f name n=0
+  for f in "$REPO_EFI"/OC/* "$REPO_EFI"/OC/.content*; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f")"
+    case "$name" in
+      config*.plist) continue ;;
+    esac
+
+    if [ "$DRY_RUN" = 1 ]; then
+      if cmp -s "$f" "$TARGET_EFI/OC/$name" 2>/dev/null; then
+        echo "  [dry-run] $name  已一致"
+      else
+        echo "  [dry-run] $name  将写入（源 $(stat -f '%z' "$f") 字节）"
+        n=$((n + 1))
+      fi
+      continue
+    fi
+
+    cmp -s "$f" "$TARGET_EFI/OC/$name" 2>/dev/null && continue
+    cp "$f" "$TARGET_EFI/OC/$name" || die "复制失败: OC/$name"
+    printf '  %s  (%s 字节)\n' "$name" "$(stat -f '%z' "$f")"
+    n=$((n + 1))
+  done
+  [ "$DRY_RUN" = 1 ] || sync
+  printf '  %d 个直属文件已更新\n' "$n"
+}
+
 # ---------------------------------------------------------------- 收尾
 
 # 清理写入过程中带上来的 macOS 元数据。
@@ -257,6 +306,26 @@ finish() {
   clean_metadata
   after="$(find "$TARGET_EFI" -name '._*' 2>/dev/null | wc -l | tr -d ' ')"
   echo "  已清理 macOS 元数据: ._ 文件 $before -> $after"
+
+  # ---- 端到端核验: 除 APPLE/ 外，分区必须与仓库逐文件一致 ----
+  # 这一步能兜住「只同步了一半」的情况（例如漏掉 OC/OpenCore.efi）。
+  local d leftover
+  d="$({ diff -r -q -x '._*' -x '.DS_Store' "$REPO_EFI/BOOT" "$TARGET_EFI/BOOT"
+         diff -r -q -x '._*' -x '.DS_Store' -x 'APPLE' \
+              -x 'config-intel网卡.plist' -x 'config-双系统.plist' \
+              -x 'config-双系统-intel网卡.plist' \
+              "$REPO_EFI/OC" "$TARGET_EFI/OC"; } 2>&1)"
+  # config.plist 两侧三码不同属预期，单独排除
+  leftover="$(printf '%s\n' "$d" | grep -v 'config\.plist' | grep -v '^[[:space:]]*$')"
+  if [ -n "$leftover" ]; then
+    printf '%s\n' "$leftover" | while IFS= read -r line; do
+      printf '  \033[31m残留差异\033[0m %s\n' "$line"
+    done
+    echo "  ✗ 分区与仓库仍存在未同步项"
+    RC=1
+  else
+    echo "  分区与仓库逐文件一致 ✓（config.plist 仅三码不同，属预期）"
+  fi
 
   if [ -n "$BK" ]; then
     echo
@@ -330,6 +399,10 @@ fi
 for r in $DIRS; do
   sync_dir "$r"
 done
+
+if [ "$MODE" = "all" ]; then
+  sync_oc_root_files
+fi
 
 if [ "$MODE" = "config" ] || [ "$MODE" = "all" ]; then
   sync_config
