@@ -24,6 +24,12 @@
 #     "CPUFriend"，兼容新旧两代。
 #     校验结果（2026-10-09 23:10，改造后首次引导）: 已加载 1.3.0 ✓
 #
+# 期望版本更新（2026-10-11）: 本轮升级了 7 个 kext —— VirtualSMC 系
+#   (VirtualSMC/SMCProcessor/SMCSuperIO) 1.3.7→1.3.8、WhateverGreen 1.7.0→1.7.1、
+#   AppleALC 1.9.7→1.9.8、AirportBrcmFixup 2.2.0→2.2.1。下方【3】的期望值已同步。
+#   （BlueToolFixup 升到 2.7.2 但 config 里 Enabled=false，不加载，故不列入核查。）
+#   重启后实测（2026-10-11 13:46）: 13 个第三方 kext 全部加载，版本全部为上面新值 ✓
+#
 # 本脚本只读，不修改任何文件。
 # 用法: tools/verify-after-reboot.sh
 #
@@ -130,12 +136,13 @@ echo "  （这两项重启前就是 1，属既有正常状态，非本次变化�
 echo
 echo "【3】其余第三方 kext（应全部加载）"
 chk "NVMeFix"      "NVMeFix"      "1.1.3"
-chk "VirtualSMC"   "VirtualSMC"   "1.3.7"
-chk "SMCProcessor" "SMCProcessor" "1.3.7"
-chk "SMCSuperIO"   "SMCSuperIO"   "1.3.7"
-chk "WhateverGreen" "WhateverGreen" "1.7.0"
-chk "AppleALC"     "AppleALC"     "1.9.7"
-chk "AirportBrcmFixup" "AirportBrcmFixup" "2.2.0"
+chk "VirtualSMC"   "VirtualSMC"   "1.3.8"
+chk "SMCProcessor" "SMCProcessor" "1.3.8"
+chk "SMCSuperIO"   "SMCSuperIO"   "1.3.8"
+chk "WhateverGreen" "WhateverGreen" "1.7.1"
+chk "AppleALC"     "AppleALC"     "1.9.8"
+chk "AirportBrcmFixup" "AirportBrcmFixup" "2.2.1"
+chk "AMFIPass"     "AMFIPass"     "1.4.1"
 chk "FeatureUnlock" "FeatureUnlock" "1.1.8"
 chk "IntelMausi"   "IntelMausi"   "1.0.8"
 chk "RestrictEvents" "RestrictEvents" "1.1.6"
